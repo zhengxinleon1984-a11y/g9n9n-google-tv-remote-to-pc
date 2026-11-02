@@ -8,6 +8,7 @@
 #include "usb/uac_microphone.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <esp_system.h>
 #include <ctype.h>
 #include <USBCDC.h>
 
@@ -205,7 +206,14 @@ static void handle_command(const String& line) {
         doc["version"] = FIRMWARE_VERSION;
         doc["target"] = HARDWARE_TARGET;
         doc["uptime_sec"] = millis() / 1000;
+        doc["reset_reason"] = (int)esp_reset_reason();
         doc["ble_state"] = (int)ble_remote_get_state();
+        doc["ble_link_connected"] = ble_remote_is_link_connected();
+        doc["atvv_activity_age_ms"] = ble_remote_get_atvv_activity_age_ms();
+        doc["voice_timeout_count"] = ble_remote_get_voice_timeout_count();
+        doc["atvv_refresh_count"] = ble_remote_get_atvv_refresh_count();
+        doc["atvv_refresh_fail_count"] = ble_remote_get_atvv_refresh_fail_count();
+        doc["ble_recovery_count"] = ble_remote_get_ble_recovery_count();
         doc["frames_decoded"] = g_audio_pipeline.total_frames_decoded;
         doc["samples_pushed"] = g_audio_pipeline.total_samples_pushed;
         doc["free_heap"] = ESP.getFreeHeap();

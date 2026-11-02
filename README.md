@@ -79,6 +79,10 @@ G9N9N 语音键
 - AGC 增益、缓冲量、欠载计数
 - Web 地址与运行时间
 
+长时间空闲时，固件每分钟轻量刷新 ATVV 订阅并查询 CAPS；链路状态、AUD/CTL
+订阅或语音会话异常会自动恢复。诊断字段和恢复策略见
+[IDLE_VOICE_RECOVERY.md](IDLE_VOICE_RECOVERY.md)。
+
 ## 编译
 
 ```powershell

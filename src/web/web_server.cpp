@@ -14,6 +14,7 @@
 #include "config/config_backup.h"
 #include <WebServer.h>
 #include <ArduinoJson.h>
+#include <esp_system.h>
 
 #ifndef REMOTEMAPPER_OTA
 #define REMOTEMAPPER_OTA 0
@@ -32,7 +33,14 @@ static void handle_status() {
     doc["firmware"] = FIRMWARE_NAME;
     doc["version"] = FIRMWARE_VERSION;
     doc["uptime_sec"] = millis() / 1000;
+    doc["reset_reason"] = (int)esp_reset_reason();
     doc["ble_state"] = (int)ble_remote_get_state();
+    doc["ble_link_connected"] = ble_remote_is_link_connected();
+    doc["atvv_activity_age_ms"] = ble_remote_get_atvv_activity_age_ms();
+    doc["voice_timeout_count"] = ble_remote_get_voice_timeout_count();
+    doc["atvv_refresh_count"] = ble_remote_get_atvv_refresh_count();
+    doc["atvv_refresh_fail_count"] = ble_remote_get_atvv_refresh_fail_count();
+    doc["ble_recovery_count"] = ble_remote_get_ble_recovery_count();
     doc["battery_pct"] = ble_remote_get_battery_pct();
     doc["remote_name"] = ble_remote_get_connected_name();
     doc["atvv_audio_ready"] = ble_remote_is_audio_ready();

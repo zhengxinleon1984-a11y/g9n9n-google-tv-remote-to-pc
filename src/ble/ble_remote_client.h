@@ -85,6 +85,37 @@ uint32_t ble_remote_get_frame_size(void);
 bool ble_remote_is_audio_ready(void);
 
 /**
+ * @brief Whether the BLE GATT link is currently up.
+ */
+bool ble_remote_is_link_connected(void);
+
+/**
+ * @brief Age of the most recent ATVV audio/control activity.
+ * @return Milliseconds since activity, or UINT32_MAX if none was received.
+ */
+uint32_t ble_remote_get_atvv_activity_age_ms(void);
+
+/**
+ * @brief Number of voice sessions forced closed by the fast watchdog.
+ */
+uint32_t ble_remote_get_voice_timeout_count(void);
+
+/**
+ * @brief Number of idle ATVV health refreshes attempted.
+ */
+uint32_t ble_remote_get_atvv_refresh_count(void);
+
+/**
+ * @brief Number of consecutive failed ATVV health refreshes.
+ */
+uint32_t ble_remote_get_atvv_refresh_fail_count(void);
+
+/**
+ * @brief Number of automatic BLE recovery actions.
+ */
+uint32_t ble_remote_get_ble_recovery_count(void);
+
+/**
  * @brief Name of the currently connected remote, or an empty String.
  */
 String ble_remote_get_connected_name(void);

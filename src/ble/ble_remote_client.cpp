@@ -53,7 +53,19 @@ static uint32_t                        s_last_extend_ms = 0;
 static uint32_t                        s_last_voice_down_ms = 0;
 static uint32_t                        s_last_scan_ms = 0;
 static uint32_t                        s_last_keepalive_ms = 0;
+static volatile uint32_t               s_last_atvv_activity_ms = 0;
+static uint32_t                        s_next_atvv_refresh_ms = 0;
+static uint32_t                        s_last_voice_timeout_ms = 0;
+static uint32_t                        s_voice_timeout_count = 0;
+static uint32_t                        s_atvv_refresh_count = 0;
+static uint32_t                        s_atvv_refresh_fail_count = 0;
+static uint32_t                        s_ble_recovery_count = 0;
 static size_t                          s_frame_size = AUDIO_DEFAULT_FRAME_BYTES;
+
+static constexpr uint32_t kAtvvRefreshIntervalMs = 60000;
+static constexpr uint32_t kVoiceSilenceTimeoutMs = 3000;
+static constexpr uint32_t kVoiceRecoveryRepeatWindowMs = 30000;
+static constexpr uint32_t kBleHealthRetryDelayMs = 2000;
 
 extern key_mapper_engine_t g_key_engine;
 
@@ -76,6 +88,7 @@ static void on_battery_notify(NimBLERemoteCharacteristic* pChar, uint8_t* pData,
 static void on_audio_notify(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
     if (length == 0) return;
     s_last_audio_ms = millis();
+    s_last_atvv_activity_ms = s_last_audio_ms;
     audio_pipeline_feed_adpcm(&g_audio_pipeline, pData, length);
 }
 
@@ -83,6 +96,7 @@ static void on_audio_notify(NimBLERemoteCharacteristic* pChar, uint8_t* pData, s
 static void on_ctl_notify(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
     if (length < 1) return;
     uint8_t op = pData[0];
+    s_last_atvv_activity_ms = millis();
 
     // G9N9N asks the host to open the microphone with 0x08 before it
     // starts the remote-initiated audio stream. The host must answer this
@@ -444,6 +458,9 @@ class ClientCallbacks : public NimBLEClientCallbacks {
         s_char_ctl = nullptr;
         s_char_bat = nullptr;
         s_battery_pct = -1;
+        s_last_atvv_activity_ms = 0;
+        s_next_atvv_refresh_ms = 0;
+        s_atvv_refresh_fail_count = 0;
         s_last_hogp_key = 0;
 #ifdef REMOTEMAPPER_G9N9N
         memset(s_g9_active_keys, 0, sizeof(s_g9_active_keys));
@@ -679,6 +696,9 @@ static bool setup_services_and_handshake() {
         app_log("ATVV", "Handshake: GET_CAPS query sent (Mic remains in low-power standby)");
     }
 
+    s_last_atvv_activity_ms = millis();
+    s_next_atvv_refresh_ms = millis() + kAtvvRefreshIntervalMs;
+    s_atvv_refresh_fail_count = 0;
     s_ble_state = BLE_STATE_CONNECTED;
     led_indicator_set(LED_STATE_CONNECTED);
     s_last_keepalive_ms = millis();
@@ -839,6 +859,24 @@ void ble_remote_task(void) {
         start_scan();
     }
 
+    // If the GATT callback was missed, do not leave the state machine falsely
+    // believing that a dead link is still connected.
+    if (s_ble_state >= BLE_STATE_CONNECTED &&
+        (!s_client || !s_client->isConnected())) {
+        app_log("BLE", "Link supervision: state=%d but GATT client is down; restarting scan",
+                (int)s_ble_state);
+        s_ble_state = BLE_STATE_DISCONNECTED;
+        s_do_connect = false;
+        s_char_cmd = nullptr;
+        s_char_aud = nullptr;
+        s_char_ctl = nullptr;
+        s_char_bat = nullptr;
+        s_last_atvv_activity_ms = 0;
+        s_next_atvv_refresh_ms = 0;
+        s_ble_recovery_count++;
+        start_scan();
+    }
+
     // 2. Process asynchronous connection requests from FreeRTOS task
     if (s_do_connect) {
         s_do_connect = false;
@@ -867,7 +905,8 @@ void ble_remote_task(void) {
     }
 
     // 4. Background recovery if ATVV was missed during handshake (runs safely on Core 0 FreeRTOS task)
-    if (s_ble_state >= BLE_STATE_CONNECTED && s_client && s_client->isConnected() && s_char_cmd == nullptr) {
+    if (s_ble_state >= BLE_STATE_CONNECTED && s_client && s_client->isConnected() &&
+        (s_char_cmd == nullptr || s_char_aud == nullptr || s_char_ctl == nullptr)) {
         static uint32_t s_last_atvv_recovery = 0;
         if (now - s_last_atvv_recovery > 3000) {
             s_last_atvv_recovery = now;
@@ -889,11 +928,51 @@ void ble_remote_task(void) {
                         }
                     }
                     if (s_char_cmd) {
+                        s_last_atvv_activity_ms = now;
+                        s_next_atvv_refresh_ms = now + kAtvvRefreshIntervalMs;
                         app_log("ATVV", "Background recovery succeeded: cmd=%p, aud=%p, ctl=%p", s_char_cmd, s_char_aud, s_char_ctl);
                         uint8_t cmd_caps[] = { 0x0A, 0x01, 0x00, 0x00, 0x03, 0x03 };
                         s_char_cmd->writeValue(cmd_caps, sizeof(cmd_caps), false);
                     }
                 }
+            }
+        }
+    }
+
+    // 4.5. Idle ATVV health refresh. Re-writing CCCD descriptors and asking
+    // for CAPS catches a subscription that silently died while the remote was
+    // asleep, without resetting the whole device.
+    if (s_ble_state == BLE_STATE_CONNECTED && s_client && s_client->isConnected() &&
+        s_char_cmd && s_char_aud && s_char_ctl &&
+        (int32_t)(now - s_next_atvv_refresh_ms) >= 0) {
+        bool ok = true;
+        if (s_char_aud->canNotify()) {
+            ok = s_char_aud->subscribe(true, on_audio_notify, false) && ok;
+        } else {
+            ok = false;
+        }
+        if (s_char_ctl->canNotify()) {
+            ok = s_char_ctl->subscribe(true, on_ctl_notify, false) && ok;
+        } else {
+            ok = false;
+        }
+        uint8_t cmd_caps[] = { 0x0A, 0x01, 0x00, 0x00, 0x03, 0x03 };
+        ok = s_char_cmd->writeValue(cmd_caps, sizeof(cmd_caps), false) && ok;
+        s_atvv_refresh_count++;
+        if (ok) {
+            s_atvv_refresh_fail_count = 0;
+            s_last_atvv_activity_ms = now;
+            s_next_atvv_refresh_ms = now + kAtvvRefreshIntervalMs;
+            app_log("ATVV", "Idle health refresh OK (aud/ctl subscribed, CAPS queried)");
+        } else {
+            s_atvv_refresh_fail_count++;
+            s_next_atvv_refresh_ms = now + kBleHealthRetryDelayMs;
+            app_log("ATVV", "Idle health refresh failed (%u/2)",
+                    (unsigned)s_atvv_refresh_fail_count);
+            if (s_atvv_refresh_fail_count >= 2) {
+                app_log("BLE", "Two ATVV health refreshes failed; forcing BLE reconnect");
+                s_ble_recovery_count++;
+                s_req_reconnect = true;
             }
         }
     }
@@ -914,10 +993,19 @@ void ble_remote_task(void) {
     }
 
     // 6. Voice session watchdog: recover if the ATVV release notification was lost.
-    if (s_ble_state == BLE_STATE_TALKING && now - s_last_audio_ms > 10000) {
-        app_log("ATVV", "Voice session timeout (no audio for 10s), forcing release");
+    if (s_ble_state == BLE_STATE_TALKING && now - s_last_audio_ms > kVoiceSilenceTimeoutMs) {
+        app_log("ATVV", "Voice session timeout (no audio/SYNC for %ums), forcing release",
+                (unsigned)kVoiceSilenceTimeoutMs);
         s_ble_state = BLE_STATE_CONNECTED;
         s_last_voice_down_ms = 0;
+        s_voice_timeout_count++;
+        if (s_last_voice_timeout_ms != 0 &&
+            now - s_last_voice_timeout_ms < kVoiceRecoveryRepeatWindowMs) {
+            app_log("BLE", "Repeated voice timeouts; scheduling BLE reconnect");
+            s_ble_recovery_count++;
+            s_req_reconnect = true;
+        }
+        s_last_voice_timeout_ms = now;
         key_engine_feed_key(&g_key_engine, MI_KEY_VOICE, false, now);
         if (s_char_cmd != nullptr) {
             uint8_t cmd_close[] = { 0x00 };
@@ -1039,6 +1127,32 @@ uint32_t ble_remote_get_frame_size(void) {
 
 bool ble_remote_is_audio_ready(void) {
     return s_char_aud != nullptr;
+}
+
+bool ble_remote_is_link_connected(void) {
+    return s_client != nullptr && s_client->isConnected();
+}
+
+uint32_t ble_remote_get_atvv_activity_age_ms(void) {
+    uint32_t last = s_last_atvv_activity_ms;
+    if (last == 0) return UINT32_MAX;
+    return millis() - last;
+}
+
+uint32_t ble_remote_get_voice_timeout_count(void) {
+    return s_voice_timeout_count;
+}
+
+uint32_t ble_remote_get_atvv_refresh_count(void) {
+    return s_atvv_refresh_count;
+}
+
+uint32_t ble_remote_get_atvv_refresh_fail_count(void) {
+    return s_atvv_refresh_fail_count;
+}
+
+uint32_t ble_remote_get_ble_recovery_count(void) {
+    return s_ble_recovery_count;
 }
 
 String ble_remote_get_connected_name(void) {
