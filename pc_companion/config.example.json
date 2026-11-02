@@ -1,0 +1,12 @@
+{
+  "F13": {
+    "name": "Example action",
+    "command": "notepad.exe",
+    "enabled": false
+  },
+  "F14": {
+    "name": "Open example website",
+    "command": "start https://example.com/",
+    "enabled": false
+  }
+}
