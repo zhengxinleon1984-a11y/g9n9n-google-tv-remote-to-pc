@@ -69,3 +69,63 @@
 1. **彻底消除端点冲突**：我们删除了硬编码的端点赋值，改用标准的底层 API `tinyusb_get_free_in_endpoint()` 为麦克风动态申请专属的物理端点。现在，麦克风（UAC）和键盘（HID）拥有了各自独立的高速车道，再怎么滚键盘也绝对不会发生物理碰撞。
 2. **事件驱动单线程闭环**：我们彻底删除了占用极高 CPU 且极其危险的 `uac_mic_task` 轮询线程。现在的音频发送完全交给 `tud_task` 触发的 `uac_driver_xfer_cb` 中断回调去串行执行。
 3. **保留软件级看门狗作为安全网**：由于早期的踩坑，我们发现即使发生网络波动导致 Windows 漏掉一次等时传输，旧版 TinyUSB 的 `busy` 标志位也可能无法自行恢复。因此我们保留了一个超轻量级的看门狗：一旦监测到 50ms 无中断，就会使用“神级后门” `usbd_edpt_clear_stall(0, ep_addr)` 无条件抹除残留的 `busy` 标志位并重启传输，为整个 USB 复合设备提供了坚不可摧的稳定性。
+
+---
+
+## Bug 4: 状态 LCD 刷新阻塞 USB UAC 等时端点，导致 Windows 收不到麦克风
+
+### 现象描述
+加入 ES3C28P 状态屏后，遥控器的 ATVV 音频仍然正常到达，`frames_decoded`
+持续增长，BLE 状态也能进入 `TALKING`；但 Windows 一打开
+`RemoteMapper Wireless Microphone`，设备就会反复出现：
+
+```text
+[UAC] Watchdog: Isochronous IN idle/stalled for 3s
+[UAC] Endpoint stayed stale after soft reset
+[UAC] Full USB re-enumeration fallback
+```
+
+此时 `/api/status` 常见状态为：
+
+```text
+atvv_audio_ready=true
+frames_decoded 持续增长
+ring_samples=8192
+uac_mounted=true
+uac_streaming=false
+uac_transfers=0
+```
+
+Windows 能枚举麦克风，但录音软件打开后没有音频，并触发 USB 重枚举。
+
+### 根本原因
+状态屏原先每块连续刷新 20 行 SPI 像素，单次约占用 6 ms。UAC 等时 IN
+端点要求每 2 ms 由 TinyUSB 回调提交一次数据。LCD 刷新任务在部分时序窗口内
+占住 SPI/DMA 和调度路径，使 UAC 回调错过服务窗口；端点随后被看门狗判定为
+停滞并重开，但重开又会与仍在进行的 LCD 刷新互相踩踏，最终触发整设备重枚举。
+
+BLE、ATVV 解码、UAC 初始化和 Windows 枚举都没有坏；问题是显示刷新把实时 USB
+音频饿死了。
+
+### 解法
+1. 将状态屏 SPI 分块从 20 行改为 4 行，每块约 2.56 KB，缩短单次阻塞时间。
+2. 当 `ble_remote_get_state() == BLE_STATE_TALKING` 或
+   `uac_microphone_is_streaming()` 为真时，整屏刷新直接暂停。
+3. 每个 SPI 分块发送后再次检查语音/UAC 状态，发现开始通话就立即中止本次刷新。
+4. 语音结束后下一轮 1 秒定时刷新自动恢复，不需要重启。
+
+### 验证
+- Windows DirectShow/ffmpeg 连续录音 15 秒正常退出。
+- 录制期间 `/api/status` 返回：
+
+```text
+ble_state=4
+uac_mounted=true
+uac_streaming=true
+uac_transfers 持续增长
+uac_last_error 空
+audio_underruns=0
+```
+
+- 真实 G9N9N 语音结束后 `frames_decoded=137`，UAC 累计传输超过 30000。
+- 测试音频有声，均值约 `-13.6 dB`，没有再触发 watchdog 或 USB 重枚举。

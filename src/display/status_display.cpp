@@ -25,7 +25,10 @@ namespace {
 constexpr char kTag[] = "STATUS_LCD";
 constexpr int kWidth = 320;
 constexpr int kHeight = 240;
-constexpr int kChunkRows = 20;
+// Keep each SPI transaction below the USB isochronous service window. The
+// previous 20-row chunks could monopolize the SPI/DMA path for ~6ms and starve
+// the 2ms UAC IN endpoint.
+constexpr int kChunkRows = 4;
 constexpr int kChunkPixels = kWidth * kChunkRows;
 
 constexpr gpio_num_t kPinBacklight = GPIO_NUM_45;
@@ -392,6 +395,10 @@ esp_err_t SetAddressWindow(int x0, int y0, int x1, int y1) {
 
 bool Present() {
     if (!g_ready) return false;
+    if (ble_remote_get_state() == BLE_STATE_TALKING ||
+        uac_microphone_is_streaming()) {
+        return false;
+    }
     if (SetAddressWindow(0, 0, kWidth - 1, kHeight - 1) != ESP_OK) return false;
     gpio_set_level(kPinDc, 1);
 
@@ -400,6 +407,10 @@ bool Present() {
         const size_t bytes = (size_t)rows * kWidth * sizeof(uint16_t);
         memcpy(g_dma_buffer, g_framebuffer + (size_t)row * kWidth, bytes);
         if (PanelTransmit(g_dma_buffer, bytes * 8) != ESP_OK) return false;
+        if (ble_remote_get_state() == BLE_STATE_TALKING ||
+            uac_microphone_is_streaming()) {
+            return false;
+        }
         if (row + kChunkRows < kHeight) taskYIELD();
     }
     return true;
@@ -638,7 +649,10 @@ void Render() {
 void StatusTask(void*) {
     app_log(kTag, "Status display task started");
     while (true) {
-        Render();
+        if (ble_remote_get_state() != BLE_STATE_TALKING &&
+            !uac_microphone_is_streaming()) {
+            Render();
+        }
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

@@ -20,11 +20,13 @@ The LCD bus does not share the ES8311 I2S pins.
 
 - RGB565 framebuffer in PSRAM
 - Internal DMA-capable transfer buffer
-- 20-row SPI chunks at 20MHz
+- 4-row SPI chunks at 20MHz
 - `MADCTL=0x28`
 - `INVON (0x21)` enabled for this panel
 - Dedicated Core 1 task at priority 1
 - One refresh per second
+- Refresh is paused while BLE is in `TALKING` state or UAC is streaming, so the
+  LCD bus cannot starve the 2 ms isochronous USB IN endpoint
 
 ## Displayed telemetry
 
