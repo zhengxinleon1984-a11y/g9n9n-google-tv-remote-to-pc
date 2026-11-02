@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.5-g9n9n-idle-recovery
+
+- Increased the stuck voice-session timeout from 3 to 5 seconds after hardware
+  logs showed a false timeout when a valid SYNC arrived near the boundary.
+- Made the audio timestamp volatile and based the watchdog on the synchronized
+  ATVV activity timestamp, avoiding a stale cross-task read.
+- Rebuilt without changing the 1.2.4 idle refresh and recovery behavior.
+
 ## 1.2.4-g9n9n-idle-recovery
 
 - Added a 60-second idle ATVV health refresh that re-subscribes AUD/CTL and

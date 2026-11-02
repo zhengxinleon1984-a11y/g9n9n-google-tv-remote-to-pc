@@ -27,7 +27,7 @@ seconds. It did not cover:
    re-subscribe all discovered characteristics.
 4. Two consecutive refresh failures trigger one BLE reconnect. Failures are
    retried after 2 seconds.
-5. A voice session with no AUDIO or SYNC for 3 seconds is force-released. Two
+5. A voice session with no AUDIO or SYNC for 5 seconds is force-released. Two
    timeouts within 30 seconds escalate to one BLE reconnect.
 6. Recovery is rate-limited by state transitions; there is no timer that reboots
    the whole device.
@@ -62,10 +62,13 @@ voice_timeout_count=0
 - PlatformIO build: success.
 - Native tests: 6/6 passed.
 - Hardware speech test: successful.
+- A 3-second threshold produced one false timeout when a valid SYNC arrived at
+  the boundary. Version 1.2.5 uses the volatile ATVV activity timestamp and a
+  5-second threshold instead.
 - Observed after an idle period:
 
 ```text
-version=1.2.4-g9n9n-idle-recovery
+version=1.2.5-g9n9n-idle-recovery
 ble_state=3
 ble_link_connected=True
 atvv_refresh_count=2

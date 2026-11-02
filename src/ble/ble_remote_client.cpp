@@ -48,7 +48,7 @@ static String                          s_pending_mac = "";
 static uint8_t                         s_pending_addr_type = BLE_ADDR_RANDOM;
 
 static uint8_t                         s_session_id = 0;
-static uint32_t                        s_last_audio_ms = 0;
+static volatile uint32_t               s_last_audio_ms = 0;
 static uint32_t                        s_last_extend_ms = 0;
 static uint32_t                        s_last_voice_down_ms = 0;
 static uint32_t                        s_last_scan_ms = 0;
@@ -63,7 +63,7 @@ static uint32_t                        s_ble_recovery_count = 0;
 static size_t                          s_frame_size = AUDIO_DEFAULT_FRAME_BYTES;
 
 static constexpr uint32_t kAtvvRefreshIntervalMs = 60000;
-static constexpr uint32_t kVoiceSilenceTimeoutMs = 3000;
+static constexpr uint32_t kVoiceSilenceTimeoutMs = 5000;
 static constexpr uint32_t kVoiceRecoveryRepeatWindowMs = 30000;
 static constexpr uint32_t kBleHealthRetryDelayMs = 2000;
 
@@ -993,7 +993,9 @@ void ble_remote_task(void) {
     }
 
     // 6. Voice session watchdog: recover if the ATVV release notification was lost.
-    if (s_ble_state == BLE_STATE_TALKING && now - s_last_audio_ms > kVoiceSilenceTimeoutMs) {
+    uint32_t last_atvv_activity = s_last_atvv_activity_ms;
+    if (s_ble_state == BLE_STATE_TALKING && last_atvv_activity != 0 &&
+        now - last_atvv_activity > kVoiceSilenceTimeoutMs) {
         app_log("ATVV", "Voice session timeout (no audio/SYNC for %ums), forcing release",
                 (unsigned)kVoiceSilenceTimeoutMs);
         s_ble_state = BLE_STATE_CONNECTED;
