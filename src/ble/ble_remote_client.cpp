@@ -3,6 +3,7 @@
 #include "led_indicator.h"
 #include "keymap/key_state_machine.h"
 #include "usb/usb_composite.h"
+#include "usb/uac_microphone.h"
 #include "log/app_log.h"
 #include <Arduino.h>
 #include <cstring>
@@ -60,12 +61,39 @@ static uint32_t                        s_voice_timeout_count = 0;
 static uint32_t                        s_atvv_refresh_count = 0;
 static uint32_t                        s_atvv_refresh_fail_count = 0;
 static uint32_t                        s_ble_recovery_count = 0;
+static volatile uint32_t               s_last_user_activity_ms = 0;
+static volatile uint32_t               s_ble_task_heartbeat_ms = 0;
 static size_t                          s_frame_size = AUDIO_DEFAULT_FRAME_BYTES;
+static volatile bool                   s_idle_reset_done = false;
+static volatile bool                   s_clear_idle_reset = false;
+static volatile uint8_t                s_stall_reboot_count = 0;
+static volatile bool                   s_clear_stall_reboot_count = false;
 
 static constexpr uint32_t kAtvvRefreshIntervalMs = 60000;
 static constexpr uint32_t kVoiceSilenceTimeoutMs = 5000;
 static constexpr uint32_t kVoiceRecoveryRepeatWindowMs = 30000;
 static constexpr uint32_t kBleHealthRetryDelayMs = 2000;
+static constexpr uint32_t kBleTaskStallRebootMs = 30000;
+static constexpr uint32_t kIdleMaintenanceFirstRebootMs = 15UL * 60UL * 1000UL;
+static constexpr uint32_t kIdleMaintenanceRepeatMs = 60UL * 60UL * 1000UL;
+static constexpr uint8_t kMaxStallReboots = 3;
+static constexpr const char* kIdleResetNvsKey = "idle_reset_done_v2";
+static constexpr const char* kLegacyIdleResetNvsKey = "idle_reset_done";
+static constexpr const char* kStallRebootNvsKey = "stall_reboot_count";
+
+static Preferences s_idle_prefs;
+static bool s_idle_prefs_ready = false;
+static bool s_stall_limit_logged = false;
+
+static void mark_user_activity() {
+    s_last_user_activity_ms = millis();
+    if (s_idle_reset_done) {
+        s_clear_idle_reset = true;
+    }
+    if (s_stall_reboot_count > 0) {
+        s_clear_stall_reboot_count = true;
+    }
+}
 
 extern key_mapper_engine_t g_key_engine;
 
@@ -87,6 +115,7 @@ static void on_battery_notify(NimBLERemoteCharacteristic* pChar, uint8_t* pData,
 // Audio Notification Callback (ATVV Char 0x03)
 static void on_audio_notify(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
     if (length == 0) return;
+    mark_user_activity();
     s_last_audio_ms = millis();
     s_last_atvv_activity_ms = s_last_audio_ms;
     audio_pipeline_feed_adpcm(&g_audio_pipeline, pData, length);
@@ -110,6 +139,7 @@ static void on_ctl_notify(NimBLERemoteCharacteristic* pChar, uint8_t* pData, siz
     // Remote-initiated ATVV sessions start with AUDIO_START (0x04) or
     // MIC_OPEN request (0x08), depending on the remote firmware.
     if (op == 0x04 || op == 0x08) {
+        mark_user_activity();
         uint32_t now = millis();
         if (s_ble_state == BLE_STATE_TALKING) {
             uint32_t since_down = now - s_last_voice_down_ms;
@@ -134,6 +164,7 @@ static void on_ctl_notify(NimBLERemoteCharacteristic* pChar, uint8_t* pData, siz
     }
     // AUDIO_STOP (0x00) or MIC_CLOSE (0x0C) ends the held voice session.
     else if (op == 0x00 || op == 0x0C) {
+        mark_user_activity();
         if (s_ble_state == BLE_STATE_TALKING) {
             s_ble_state = BLE_STATE_CONNECTED;
             s_last_voice_down_ms = 0;
@@ -153,6 +184,7 @@ static void on_ctl_notify(NimBLERemoteCharacteristic* pChar, uint8_t* pData, siz
     }
     // AUDIO_SYNC: op == 0x0A
     else if (op == 0x0A && length >= 7) {
+        mark_user_activity();
         s_last_audio_ms = millis();
         int16_t pred = (int16_t)((pData[4] << 8) | pData[5]);
         int8_t step_idx = (int8_t)pData[6];
@@ -218,6 +250,7 @@ static void feed_g9_report(const uint8_t* data, size_t length) {
 // HOGP HID Report Notification Callback
 static void on_hogp_report_notify(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
     if (length < 1) return;
+    mark_user_activity();
 
     // 1. Non-keyboard / vendor packets (len > 8, e.g. fallback HOGP voice or sensor reports)
     // NEVER feed these into audio_pipeline! Legitimate voice strictly arrives via on_audio_notify (ATVV Char ab5e0003).
@@ -500,7 +533,10 @@ static void start_scan() {
     pScan->setActiveScan(true);
     pScan->setInterval(BLE_SCAN_INTERVAL_MS);
     pScan->setWindow(BLE_SCAN_WINDOW_MS);
-    pScan->start(0, false); // 0 = continuous scan until stopped
+    // Use the non-blocking overload. start(0, false) selects the blocking
+    // overload with duration=forever and leaves the BLE task trapped inside
+    // NimBLEScan::start() until the scan is explicitly stopped.
+    pScan->start(0, nullptr, false);
     app_log("BLE", "Continuous scanning for Xiaomi Bluetooth Remote active...");
 }
 
@@ -699,6 +735,7 @@ static bool setup_services_and_handshake() {
     s_last_atvv_activity_ms = millis();
     s_next_atvv_refresh_ms = millis() + kAtvvRefreshIntervalMs;
     s_atvv_refresh_fail_count = 0;
+    s_last_user_activity_ms = millis();
     s_ble_state = BLE_STATE_CONNECTED;
     led_indicator_set(LED_STATE_CONNECTED);
     s_last_keepalive_ms = millis();
@@ -810,6 +847,12 @@ extern "C" {
 
 void ble_remote_init(void) {
     s_ble_prefs.begin("ble_conf", false);
+    if (s_ble_prefs.isKey(kLegacyIdleResetNvsKey)) {
+        s_ble_prefs.remove(kLegacyIdleResetNvsKey);
+    }
+    s_idle_reset_done = s_ble_prefs.getBool(kIdleResetNvsKey, false);
+    s_stall_reboot_count = s_ble_prefs.getUChar(kStallRebootNvsKey, 0);
+    s_last_user_activity_ms = millis();
     s_bound_mac = s_ble_prefs.getString("bound_mac", "");
     s_bound_name = s_ble_prefs.getString("bound_name", "");
     s_bound_addr_type = s_ble_prefs.getUChar("bound_type", BLE_ADDR_RANDOM);
@@ -835,6 +878,7 @@ void ble_remote_init(void) {
 }
 
 void ble_remote_task(void) {
+    s_ble_task_heartbeat_ms = millis();
     uint32_t now = millis();
 
     // 1. Process asynchronous unpair / reconnect requests from Core 1
@@ -993,9 +1037,10 @@ void ble_remote_task(void) {
     }
 
     // 6. Voice session watchdog: recover if the ATVV release notification was lost.
+    uint32_t watchdog_now = millis();
     uint32_t last_atvv_activity = s_last_atvv_activity_ms;
     if (s_ble_state == BLE_STATE_TALKING && last_atvv_activity != 0 &&
-        now - last_atvv_activity > kVoiceSilenceTimeoutMs) {
+        watchdog_now - last_atvv_activity > kVoiceSilenceTimeoutMs) {
         app_log("ATVV", "Voice session timeout (no audio/SYNC for %ums), forcing release",
                 (unsigned)kVoiceSilenceTimeoutMs);
         s_ble_state = BLE_STATE_CONNECTED;
@@ -1014,6 +1059,74 @@ void ble_remote_task(void) {
             s_char_cmd->writeValue(cmd_close, sizeof(cmd_close), false);
         }
         audio_pipeline_stop_session(&g_audio_pipeline);
+    }
+
+}
+
+void ble_remote_idle_maintenance_task(void) {
+    if (!s_idle_prefs_ready) {
+        s_idle_prefs.begin("ble_conf", false);
+        s_idle_prefs_ready = true;
+    }
+
+    if (s_clear_idle_reset) {
+        s_clear_idle_reset = false;
+        if (s_idle_reset_done) {
+            s_idle_reset_done = false;
+            s_idle_prefs.putBool(kIdleResetNvsKey, false);
+        }
+    }
+
+    if (s_clear_stall_reboot_count) {
+        s_clear_stall_reboot_count = false;
+        if (s_stall_reboot_count > 0) {
+            s_stall_reboot_count = 0;
+            s_stall_limit_logged = false;
+            s_idle_prefs.putUChar(kStallRebootNvsKey, 0);
+        }
+    }
+
+    const uint32_t now = millis();
+    const uint32_t heartbeat = s_ble_task_heartbeat_ms;
+
+    // This watchdog runs on the main Arduino loop, not inside the BLE task.
+    // If NimBLE deadlocks, the BLE task cannot recover itself.
+    if (heartbeat != 0 && now - heartbeat > kBleTaskStallRebootMs) {
+        if (s_stall_reboot_count < kMaxStallReboots) {
+            s_stall_reboot_count++;
+            s_idle_prefs.putUChar(kStallRebootNvsKey, s_stall_reboot_count);
+            app_log("SYSTEM",
+                    "BLE task stalled for %us; restarting (%u/%u)",
+                    (unsigned)((now - heartbeat) / 1000),
+                    (unsigned)s_stall_reboot_count,
+                    (unsigned)kMaxStallReboots);
+            app_log_poll();
+            delay(100);
+            ESP.restart();
+        } else if (!s_stall_limit_logged) {
+            s_stall_limit_logged = true;
+            app_log("SYSTEM",
+                    "BLE task stall limit reached (%u); automatic restart disabled until user activity or manual reboot",
+                    (unsigned)kMaxStallReboots);
+        }
+    }
+
+    const uint32_t idle_age = now - s_last_user_activity_ms;
+    const uint32_t idle_threshold = s_idle_reset_done
+                                        ? kIdleMaintenanceRepeatMs
+                                        : kIdleMaintenanceFirstRebootMs;
+    if (s_ble_state != BLE_STATE_TALKING &&
+        !uac_microphone_is_streaming() &&
+        idle_age >= idle_threshold) {
+        s_idle_reset_done = true;
+        s_idle_prefs.putBool(kIdleResetNvsKey, true);
+        app_log("SYSTEM",
+                "Idle maintenance: no user activity for %us; restarting to clear stale BLE/USB state (next check after %us)",
+                (unsigned)(idle_age / 1000),
+                (unsigned)(kIdleMaintenanceRepeatMs / 1000));
+        app_log_poll();
+        delay(100);
+        ESP.restart();
     }
 }
 
@@ -1139,6 +1252,27 @@ uint32_t ble_remote_get_atvv_activity_age_ms(void) {
     uint32_t last = s_last_atvv_activity_ms;
     if (last == 0) return UINT32_MAX;
     return millis() - last;
+}
+
+bool ble_remote_is_idle_maintenance_done(void) {
+    return s_idle_reset_done;
+}
+
+uint32_t ble_remote_get_idle_activity_age_ms(void) {
+    return millis() - s_last_user_activity_ms;
+}
+
+uint32_t ble_remote_get_idle_maintenance_due_ms(void) {
+    uint32_t age = millis() - s_last_user_activity_ms;
+    uint32_t threshold = s_idle_reset_done
+                             ? kIdleMaintenanceRepeatMs
+                             : kIdleMaintenanceFirstRebootMs;
+    return age >= threshold ? 0 : threshold - age;
+}
+
+uint32_t ble_remote_get_ble_task_heartbeat_age_ms(void) {
+    uint32_t heartbeat = s_ble_task_heartbeat_ms;
+    return heartbeat == 0 ? UINT32_MAX : millis() - heartbeat;
 }
 
 uint32_t ble_remote_get_voice_timeout_count(void) {

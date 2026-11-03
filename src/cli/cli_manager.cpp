@@ -210,6 +210,10 @@ static void handle_command(const String& line) {
         doc["ble_state"] = (int)ble_remote_get_state();
         doc["ble_link_connected"] = ble_remote_is_link_connected();
         doc["atvv_activity_age_ms"] = ble_remote_get_atvv_activity_age_ms();
+        doc["idle_maintenance_done"] = ble_remote_is_idle_maintenance_done();
+        doc["idle_activity_age_ms"] = ble_remote_get_idle_activity_age_ms();
+        doc["idle_maintenance_due_ms"] = ble_remote_get_idle_maintenance_due_ms();
+        doc["ble_task_heartbeat_age_ms"] = ble_remote_get_ble_task_heartbeat_age_ms();
         doc["voice_timeout_count"] = ble_remote_get_voice_timeout_count();
         doc["atvv_refresh_count"] = ble_remote_get_atvv_refresh_count();
         doc["atvv_refresh_fail_count"] = ble_remote_get_atvv_refresh_fail_count();

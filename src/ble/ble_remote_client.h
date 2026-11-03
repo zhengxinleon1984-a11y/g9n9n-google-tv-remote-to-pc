@@ -29,6 +29,14 @@ void ble_remote_init(void);
 void ble_remote_task(void);
 
 /**
+ * @brief Main-loop watchdog and idle maintenance task.
+ *
+ * This must run outside the BLE task so it can recover a deadlocked NimBLE
+ * task or a silently degraded ATVV session.
+ */
+void ble_remote_idle_maintenance_task(void);
+
+/**
  * @brief Get current BLE connection state
  */
 ble_remote_state_t ble_remote_get_state(void);
@@ -94,6 +102,28 @@ bool ble_remote_is_link_connected(void);
  * @return Milliseconds since activity, or UINT32_MAX if none was received.
  */
 uint32_t ble_remote_get_atvv_activity_age_ms(void);
+
+/**
+ * @brief Whether at least one idle maintenance reboot has happened since the
+ *        last HOGP, ATVV or audio activity.
+ */
+bool ble_remote_is_idle_maintenance_done(void);
+
+/**
+ * @brief Age of the most recent HOGP, ATVV or audio user activity.
+ */
+uint32_t ble_remote_get_idle_activity_age_ms(void);
+
+/**
+ * @brief Time remaining until the next idle maintenance reboot is allowed.
+ * @return Milliseconds until due, or 0 when maintenance is due now.
+ */
+uint32_t ble_remote_get_idle_maintenance_due_ms(void);
+
+/**
+ * @brief Age of the most recent BLE task heartbeat.
+ */
+uint32_t ble_remote_get_ble_task_heartbeat_age_ms(void);
 
 /**
  * @brief Number of voice sessions forced closed by the fast watchdog.

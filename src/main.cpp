@@ -123,6 +123,7 @@ void loop() {
     // 1. Service TinyUSB & Audio push
     usb_composite_task();
     app_log_poll();
+    ble_remote_idle_maintenance_task();
 
     // 2. Service Wi-Fi & DNS tasks
     wifi_manager_task();
