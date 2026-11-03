@@ -1,6 +1,6 @@
-# ES3C28P RemoteMapper 完整使用手册
+# G9N9N Google TV 遥控器直连电脑：完整使用手册
 
-本文对应固件：
+本文对应发行版 `0.1.15`，对应固件：
 
 ```text
 1.2.10-g9n9n-idle-activity-fix

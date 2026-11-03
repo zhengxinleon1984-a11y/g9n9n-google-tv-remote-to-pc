@@ -1,9 +1,11 @@
-# ES3C28P RemoteMapper for G9N9N
+# G9N9N Google TV 遥控器直连电脑
 
 把 **G9N9N / Chromecast Remote** 接到 **ES3C28P（ESP32-S3 N16R8）**，
 通过原生 USB 变成一台带屏幕诊断、网页改键和蓝牙语音输入能力的硬件桥。
 
-当前固件版本：`1.2.10-g9n9n-idle-activity-fix`
+当前发行版：`0.1.15`
+
+对应固件版本：`1.2.10-g9n9n-idle-activity-fix`
 
 > 这是一个面向具体硬件组合的定制固件，不是通用遥控器固件。使用前请先阅读
 > [硬件要求](#硬件要求) 和 [安全刷写](#安全刷写)。
